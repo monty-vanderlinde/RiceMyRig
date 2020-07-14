@@ -18,10 +18,7 @@ printf "%s\n" \
 	"1) This script is being run from a live image or full install of Arch Linux" \
 	"2) The computer has been successfully connected to the internet" \
 	"3) The computer has enough battery to complete this script" \
-	"4) All encryption/raid/lvm has already been set up" \
-	"5) All drives should already at least have a partition table (parted -s /device/path mklabel \"msdos\")(use \"gpt\" if drives are over 2 TiB)" \
-	"6) LUKS encrypted drives should only use LUKS1 headers (cryptsetup --type luks1 luksFormat /device/path)" \
-	"7) The script currently only works on x86_64 (64-bit) systems"
+	"4) The script currently expects a x86_64 (64-bit) system"
 
 printf "Press enter to start installation\n"
 stty -echo
