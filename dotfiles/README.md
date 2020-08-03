@@ -1,4 +1,4 @@
-# Dotfiles
+# Dotfiles (work in progress)
 
 The following files belong in the specified locations:
 

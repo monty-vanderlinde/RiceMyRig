@@ -20,11 +20,12 @@
 
 dev1=""                         # i.e. /dev/sda
 dev2=""                         # i.e. /dev/sdb
-dev3=""                         # i.e. /dev/sdc
+esp_raid=""                     # i.e. /dev/md/esp or /dev md0 (don't make the name /dev/md/efi !)
+root_raid=""                    # i.e. /dev/md/root or /dev/md1
 root_encr=""                    # i.e. /dev/mapper/root or /dev/dm-0
-home_raid=""                    # i.e. /dev/md/home or /dev/md0
+home_raid=""                    # i.e. /dev/md/home or /dev/md2
 home_encr=""                    # i.e. /dev/mapper/home or /dev/dm-1
-root_size=""                    # i.e. number of MiB or leave empty to fill dev1
+root_size=""                    # i.e. number of MiB
 mac_spoof=""                    # i.e. 12:34:56:ab:cd:ef
 public_ip=""                    # i.e. xxx.xxx.xxx.xxx (where xxx is a number 0<= xxx <=255)
 static_ip=""                    # i.e. 192.168.xxx.xxx or 10.0.xxx.xxx (where xxx is a number 0<= xxx <=255)
@@ -34,7 +35,7 @@ username=""                     # i.e. dave, carol, vegeta, etc.
 groupname=""                    # i.e. admins, devel, alex, or leave blank to default to the username
 
 # The start of the root partition (add 513 to MiB)
-[ "$root_size" ] && root_end="$(( root_size + 513 ))MiB" || root_end=""
+root_end="$(( root_size + 513 ))MiB"
 
 # Only ram_mib is used, but ram_gib makes calculations easy
 # Can find the memory availible with 'free -m' for mib or 'free -g' for gib
@@ -121,10 +122,10 @@ stty echo
 
 printf "Beginning Installation\n"
 
-[ "$dev1" ] && [ "$dev2" ] && [ "$dev3" ] && [ "$root_encr" ] && [ "$home_raid" ] && [ "$home_encr" ] &&
-	[ "$mac_spoof" ] && [ "$public_ip" ] && [ "$static_ip" ] &&
+[ "$dev1" ] && [ "$dev2" ] && [ "$esp_raid" ] && [ "$root_raid" ] && [ "$root_encr" ] && [ "$home_raid" ] && [ "$home_encr" ] &&
+	[ "$root_size" ] && [ "$mac_spoof" ] && [ "$public_ip" ] && [ "$static_ip" ] &&
 	[ "$gateway_ip" ] && [ "$hostname" ] && [ "$username" ] ||
-	error_exit "One of the variables have not been set in rmr_3c.sh"
+	error_exit "One of the variables have not been set in rmr_2b.sh"
 
 printf "\nSetting the keyboard layout\n"
 loadkeys us || error_exit "Failed to load keys"
@@ -137,40 +138,49 @@ timedatectl set-ntp true || error_exit "Failed to update system clock"
 
 printf "\nPartitioning the disks\n"
 
-printf "\nPartitioning %s with /efi and / partitions\n" "$dev1"
+printf "\nPartitioning %s with /efi, /, and /home partitions in RAID 1 (part 1)\n" "$dev1"
 parted -s -a optimal -- "$dev1" \
 	mkpart EFIPART fat32 1MiB 513MiB \
-	mkpart ROOT ext4 513MiB "${root_end:-"100%"}" \
+	mkpart ROOT ext4 513MiB "$root_end" \
+	mkpart HOME ext4 "$root_end" 100% \
 	set 1 esp on \
+	set 2 raid on \
+	set 3 raid on \
 	align-check optimal 1 || error_exit "Not properly aligned or other error on $dev1"
 
-printf "\nPartitioning %s with /home in RAID 1 (part 1)\n" "$dev2"
+printf "\nPartitioning %s with /efi, /, and /home partitions in RAID 1 (part 2)\n" "$dev2"
 parted -s -a optimal -- "$dev2" \
-	mkpart HOME ext4 0% 100% \
-	set 1 raid on \
+	mkpart EFIPART fat32 1MiB 513MiB \
+	mkpart ROOT ext4 513MiB "$root_end" \
+	mkpart HOME ext4 "$root_end" 100% \
+	set 1 esp on \
+	set 2 raid on \
+	set 3 raid on \
 	align-check optimal 1 || error_exit "Not properly aligned or other error on $dev2"
 
-printf "\nPartitioning %s with /home in RAID 1 (part 2)\n" "$dev3"
-parted -s -a optimal -- "$dev3" \
-	mkpart HOME ext4 0% 100% \
-	set 1 raid on \
-	align-check optimal 1 || error_exit "Not properly aligned or other error on $dev3"
+printf "\nSetting up /efi in RAID 1 on %s and %s\n" "${dev1}1" "${dev2}1"
+mdadm --create --verbose --homehost="$hostname" --name="${esp_raid##*/}" --level=1 --metadata=1.0 --raid-devices=2 "$esp_raid" "${dev1}1" "${dev2}1" ||
+	error_exit "Failed to create mdadm array on ${dev1}1 and ${dev2}1"
 
-printf "\nSetting up /home in RAID 1 on %s and %s\n" "${dev2}1" "${dev3}1"
-mdadm --create --verbose --homehost="$hostname" --name="${home_raid##*/}" --level=1 --metadata=1.2 --raid-devices=2 "$home_raid" "${dev2}1" "${dev3}1" ||
-	error_exit "Failed to create mdadm array on ${dev2}1 and ${dev3}1"
+printf "\nSetting up /root in RAID 1 on %s and %s\n" "${dev1}2" "${dev2}2"
+mdadm --create --verbose --homehost="$hostname" --name="${root_raid##*/}" --level=1 --metadata=1.2 --raid-devices=2 "$root_raid" "${dev1}2" "${dev2}2" ||
+	error_exit "Failed to create mdadm array on ${dev1}2 and ${dev2}2"
+
+printf "\nSetting up /home in RAID 1 on %s and %s\n" "${dev1}3" "${dev2}3"
+mdadm --create --verbose --homehost="$hostname" --name="${home_raid##*/}" --level=1 --metadata=1.2 --raid-devices=2 "$home_raid" "${dev1}3" "${dev2}3" ||
+	error_exit "Failed to create mdadm array on ${dev1}3 and ${dev2}3"
 
 # Find way to run these in parallel
 printf "\nWiping the data on all disks\n"
-cryptsetup open --type plain -v --cipher serpent-xts-plain64 --key-size 512 --key-file /dev/urandom "${dev1}1" to_wipe_1
-cryptsetup open --type plain -v --cipher serpent-xts-plain64 --key-size 512 --key-file /dev/urandom "${dev1}2" to_wipe_2
+cryptsetup open --type plain -v --cipher serpent-xts-plain64 --key-size 512 --key-file /dev/urandom "$esp_raid" to_wipe_1
+cryptsetup open --type plain -v --cipher serpent-xts-plain64 --key-size 512 --key-file /dev/urandom "$root_raid" to_wipe_2
 cryptsetup open --type plain -v --cipher serpent-xts-plain64 --key-size 512 --key-file /dev/urandom "$home_raid" to_wipe_3
 block_info "dm-0"
-printf "\nWiping %s\n" "${dev1}1"
-dd if=/dev/zero of=/dev/mapper/to_wipe_1 bs="$phys_block_size" count="$phys_blocks" status=progress || error_exit "Failed to wipe data on ${dev1}1"
+printf "\nWiping %s\n" "$esp_raid"
+dd if=/dev/zero of=/dev/mapper/to_wipe_1 bs="$phys_block_size" count="$phys_blocks" status=progress || error_exit "Failed to wipe data on $esp_raid"
 block_info "dm-1"
-printf "\nWiping %s\n" "${dev1}2"
-dd if=/dev/zero of=/dev/mapper/to_wipe_2 bs="$phys_block_size" count="$phys_blocks" status=progress || error_exit "Failed to wipe data on ${dev1}2"
+printf "\nWiping %s\n" "$root_raid"
+dd if=/dev/zero of=/dev/mapper/to_wipe_2 bs="$phys_block_size" count="$phys_blocks" status=progress || error_exit "Failed to wipe data on $root_raid"
 block_info "dm-2"
 printf "\nWiping %s\n" "$home_raid"
 dd if=/dev/zero of=/dev/mapper/to_wipe_3 bs="$phys_block_size" count="$phys_blocks" status=progress || error_exit "Failed to wipe data on $home_raid"
@@ -183,14 +193,14 @@ printf "\nSetting up LUKS1 encryption\n"
 while [ "true" ]
 do
 	printf "\nSetting up root encryption; enter password below\n"
-	cryptsetup -v --type luks1 --cipher serpent-xts-plain64 --key-size 512 --hash sha512 --verify-passphrase --iter-time 5000 luksFormat "${dev1}2" &&
+	cryptsetup -v --type luks1 --cipher serpent-xts-plain64 --key-size 512 --hash sha512 --verify-passphrase --iter-time 5000 luksFormat "$root_raid" &&
 		break
 	printf "Something seems to have gone wrong\n"
 	printf "Would you like to try entering the password again (y/n)? > "
 	read -r answer
 	case "$answer" in
 		y*|Y*) ;; # Loop again
-		*) error_exit "Failed to create luks container on ${dev1}2" ;;
+		*) error_exit "Failed to create luks container on $root_raid" ;;
 	esac
 done
 while [ "true" ]
@@ -209,13 +219,13 @@ done
 
 printf "\nOpening the newly created LUKS volumes\n"
 printf "\nOpening root on %s; enter password below\n" "$root_encr"
-cryptsetup open --type luks "${dev1}2" "${root_encr##*/}" || error_exit "Failed to open $root_encr"
+cryptsetup open --type luks "$root_raid" "${root_encr##*/}" || error_exit "Failed to open $root_encr"
 printf "\nOpening home on %s; enter password below\n" "$home_encr"
 cryptsetup open --type luks "$home_raid" "${home_encr##*/}" || error_exit "Failed to open $home_encr"
 
 printf "\nFormatting the partitions\n"
-printf "\nFormatting %s with fat32 and naming BOOT\n" "${dev1}1"
-mkfs.vfat -F 32 -n BOOT "${dev1}1" || error_exit "Failed mkfs.vfat on ${dev1}1"
+printf "\nFormatting %s with fat32 and naming BOOT\n" "$esp_raid"
+mkfs.vfat -F 32 -n BOOT "$esp_raid" || error_exit "Failed mkfs.vfat on $esp_raid"
 printf "\nFormatting %s with ext4, naming ROOT, and leaving 2 percent reserved blocks\n" "$root_enrc"
 mkfs.ext4 -m 2 -L ROOT "$root_encr" || error_exit "Failed mkfs.ext4 on $root_encr"
 printf "\nFormatting %s with ext4, naming HOME, and leaving 0 percent reserved blocks\n" "$home_enrc"
@@ -224,7 +234,7 @@ mkfs.ext4 -m 0 -L HOME "$home_encr" || error_exit "Failed mkfs.ext4 on $home_enc
 printf "\nMounting the file systems\n"
 mount "$root_encr" /mnt || error_exit "Failed to mount $root_encr"
 mkdir -p /mnt/efi /mnt/home || error_exit "Mkdir failed for either efi or home directory"
-mount "${dev1}1" /mnt/efi || error_exit "Failed to mount ${dev1}1"
+mount "$esp_raid" /mnt/efi || error_exit "Failed to mount $esp_raid"
 mount "$home_encr" /mnt/home || error_exit "Failed to mount $home_encr"
 
 printf "\nSetting up the %s MiB swapfile on /swapfile\n" "$ram_mib"
@@ -304,7 +314,7 @@ printf "%s\n" \
 	"GRUB_TIMEOUT=5" \
 	"GRUB_SAVEDEFAULT=true" \
 	"GRUB_DISTRIBUTOR=\"Arch\"" \
-	"GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=$(lsblk -lp -o NAME,UUID | grep "${dev1}2" | awk '{print $2}'):${root_encr##*/} root=$root_encr resume=$root_encr resume_offset=$(filefrag -v /mnt/swapfile | sed -n '4p' - | awk '{print $4}' - | sed -e 's/\.\.//' -)\"" \
+	"GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=$(lsblk -lp -o NAME,UUID | grep "$(readlink -f "$root_raid")" | awk '{print $2}'):${root_encr##*/} root=$root_encr resume=$root_encr resume_offset=$(filefrag -v /mnt/swapfile | sed -n '4p' - | awk '{print $4}' - | sed -e 's/\.\.//' -)\"" \
 	"GRUB_PRELOAD_MODULES=\"part_gpt part_msdos\"" \
 	"GRUB_ENABLE_CRYPTODISK=y" \
 	"GRUB_TIMEOUT_STYLE=menu" \
@@ -380,7 +390,7 @@ stty echo
 
 files_to_fix=""
 
-final_check "lsblk -o NAME,FSTYPE,LABEL,FSAVAIL,FSUSE%,MOUNTPOINT $dev1 $dev2 $dev3" "Does the final disk layout look alright?" ||
+final_check "lsblk -o NAME,FSTYPE,LABEL,FSAVAIL,FSUSE%,MOUNTPOINT $dev1 $dev2" "Does the final disk layout look alright?" ||
 	files_to_fix="$files_to_fix disk-layout"
 final_check "swapon" "Does the swapfile look alright?" ||
 	files_to_fix="$files_to_fix /mnt/swapfile"
